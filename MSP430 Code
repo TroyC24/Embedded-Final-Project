@@ -1,0 +1,144 @@
+#include <msp430.h>
+#include <math.h>
+
+int count = 50;
+int IRSensor();
+int MAGSensor();
+void TEMPSetup();
+void UARTSetup();
+int IR, MAG;
+float IntDegC, IntDegF;
+
+#define CALADC_15V_30C  *((unsigned int *)0x1A1A)
+#define CALADC_15V_85C  *((unsigned int *)0x1A1C)
+
+int main(void)
+{
+    //WDTCTL = WDTPW | WDTHOLD;   // stop watchdog timer
+    WDTCTL = WDT_ADLY_1000;
+    SFRIE1 |= WDTIE;
+
+    P1DIR |= BIT1; //1.0 output
+    P1OUT &= ~BIT1; //1.0 low
+
+    P1DIR &= ~BIT3;
+
+    P1DIR |= BIT4; //1.4 output
+    P1OUT |= BIT4; //1.4 high
+    P1DIR &= ~BIT5; //1.5 input
+
+    P4DIR &= - BIT1;
+    P4REN |= BIT1;
+    P4OUT |= BIT1;
+
+    TEMPSetup();
+    UARTSetup();
+
+    __bis_SR_register(GIE);
+
+    char tx[5];
+    tx[0] = 'B';
+    int i, position;
+    while (1)
+    {
+        if ((P4IN & BIT1) == 0)
+        {
+            MAG = 0;
+            IR = 0;
+        }
+
+        IR = IRSensor();               //if IR sensor triggers, sound alarm high
+        MAG = MAGSensor();       //if magnetic sensor triggers, sound alarm high
+
+        tx[1] = (char) (IR + 48);
+        tx[2] = (char) (MAG + 48);
+        
+        tx[3] = (char)(round(IntDegC/10)+48);
+        tx[4] = (char)(round(fmodf(IntDegC,10))+48);
+
+        if (IR | MAG)                            //if sound alarm high, 1.0 high
+            P1OUT |= BIT1;
+        else
+            P1OUT &= ~BIT1; //1.0 low
+
+        for (position = 0; position < sizeof(tx); position++)
+        {
+            UCA1TXBUF = tx[position];
+            for (i = 0; i < 100; i++)
+            {
+            }
+        }
+    }
+    return 0;
+}
+
+int IRSensor()
+{
+    if (IR == 0)
+    {
+        if ((P1IN & BIT3) == 0) //low voltage detected
+            count = 50;
+        else
+            //high voltage detected
+            count = count - 1;
+
+        if (count > 0)
+            return 0;       // Clear P1.0 LED off
+        else
+            //high voltage detected 100 times in a row, movement detected
+            count = 1;
+        return 1;        // Set P1.0 LED on
+    }
+    return IR;
+}
+
+int MAGSensor()
+{
+    if (MAG == 0)
+    {
+        if ((P1IN & BIT5) == BIT5) //if 1.5 high, return 0
+            return 0;
+        else
+            return 1;
+    }
+    return MAG;
+}
+
+void UARTSetup()
+{
+    UCA1CTLW0 |= UCSWRST;
+
+    UCA1CTLW0 |= UCSSEL__SMCLK;
+    UCA1BRW = 8;
+    UCA1MCTLW = 0xD600;
+
+    P4SEL1 &= ~BIT3;
+    P4SEL0 |= BIT3;
+
+    PM5CTL0 &= ~LOCKLPM5;
+
+    UCA1CTLW0 &= ~UCSWRST;
+}
+
+void TEMPSetup()
+{
+    ADCCTL0 |= ADCSHT_8 | ADCON;        // ADC ON,temperature sample period>30us
+    ADCCTL1 |= ADCSHP;                       // s/w trig, single ch/conv, MODOSC
+    ADCCTL2 &= ~ADCRES;                                // clear ADCRES in ADCCTL
+    ADCCTL2 |= ADCRES_2;                            // 12-bit conversion results
+    ADCMCTL0 |= ADCSREF_1 | ADCINCH_12;        // ADC input ch A12 => temp sense
+
+    PMMCTL0_H = PMMPW_H;                             // Unlock the PMM registers
+    PMMCTL2 |= INTREFEN | TSENSOREN | REFVSEL_0; // Enable internal 1.5V reference and temperature sensor
+
+}
+
+#pragma vector=WDT_VECTOR
+__interrupt void WDT_ISR(void)
+{
+    ADCCTL0 |= ADCENC | ADCSC;
+    float temp = ADCMEM0;
+    IntDegC = (temp - CALADC_15V_30C) * (85 - 30) / (CALADC_15V_85C - CALADC_15V_30C) + 30;
+    IntDegF = 9 * IntDegC / 5 + 32;
+}
+
